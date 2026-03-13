@@ -2,9 +2,10 @@
 Telegram-бот «Продувка» — определение уровня фридайвера
 и персональные рекомендации по эквализации.
 
+3 вопроса: глубина → техника продувки → статика → результат.
+
 Запуск:
-    export BOT_TOKEN="123456:ABC-DEF..."
-    pip install aiogram
+    pip install -r requirements.txt
     python bot.py
 """
 
@@ -30,13 +31,10 @@ from config import BOT_TOKEN
 from recommendations import (
     QUESTION_1_TEXT,
     QUESTION_2_TEXT,
+    QUESTION_3_TEXT,
     RECOMMENDATIONS,
     WELCOME_TEXT,
 )
-
-# ──────────────────────────────────────────────
-#  Логирование
-# ──────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,46 +43,45 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────
-#  FSM States
-# ──────────────────────────────────────────────
+# ── FSM States ────────────────────────────────────────────────
 
 
 class Quiz(StatesGroup):
-    waiting_depth = State()  # ждём ответ на вопрос 1 (глубина)
-    waiting_tech = State()   # ждём ответ на вопрос 2 (техника)
+    waiting_depth = State()
+    waiting_tech = State()
+    waiting_static = State()
 
 
-# ──────────────────────────────────────────────
-#  Логика определения уровня
-# ──────────────────────────────────────────────
+# ── Scoring ───────────────────────────────────────────────────
 
 DEPTH_SCORES = {
-    "depth_zero": 0,     # нулевой
-    "depth_15": 1,       # средний
-    "depth_30": 2,       # средний-продвинутый
-    "depth_30plus": 3,   # мастер
+    "depth_zero": 0,
+    "depth_15": 1,
+    "depth_30": 2,
+    "depth_30plus": 3,
 }
 
 TECH_SCORES = {
-    "tech_valsalva": 0,   # нулевой
-    "tech_frenzel": 1,    # средний
-    "tech_mouthfill": 2,  # мастер
+    "tech_valsalva": 0,
+    "tech_frenzel": 1,
+    "tech_mouthfill": 2,
+}
+
+STATIC_SCORES = {
+    "static_0": 0,   # не замерял / < 1 мин
+    "static_1": 1,   # 1–2 мин
+    "static_2": 2,   # 2–3,5 мин
+    "static_3": 3,   # 3,5+ мин
 }
 
 
-def determine_level(depth: str, tech: str) -> str:
-    """
-    Матрица определения уровня.
-
-    Приоритет: берём МИНИМАЛЬНЫЙ из двух сигналов.
-    Безопаснее дать базовые рекомендации продвинутому,
-    чем продвинутые рекомендации новичку.
-    """
-    d = DEPTH_SCORES.get(depth, 0)
-    t = TECH_SCORES.get(tech, 0)
-    combined = min(d, t)
-
+def determine_level(depth: str, tech: str, static: str) -> str:
+    """Уровень = самое слабое звено из трёх ответов."""
+    combined = min(
+        DEPTH_SCORES.get(depth, 0),
+        TECH_SCORES.get(tech, 0),
+        STATIC_SCORES.get(static, 0),
+    )
     if combined == 0:
         return "zero"
     elif combined == 1:
@@ -93,9 +90,7 @@ def determine_level(depth: str, tech: str) -> str:
         return "master"
 
 
-# ──────────────────────────────────────────────
-#  Клавиатуры
-# ──────────────────────────────────────────────
+# ── Keyboards ─────────────────────────────────────────────────
 
 
 def welcome_keyboard() -> InlineKeyboardMarkup:
@@ -133,7 +128,7 @@ def tech_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
-                text="🤷 Не знаю / зажимаю нос и дую",
+                text="🤷 Вальсальва (зажимаю нос и дую)",
                 callback_data="tech_valsalva",
             )],
             [InlineKeyboardButton(
@@ -143,6 +138,29 @@ def tech_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(
                 text="🐡 Маусфилл",
                 callback_data="tech_mouthfill",
+            )],
+        ]
+    )
+
+
+def static_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🌱 Не замерял(а) / меньше 1 минуты",
+                callback_data="static_0",
+            )],
+            [InlineKeyboardButton(
+                text="⏱ 1–2 минуты",
+                callback_data="static_1",
+            )],
+            [InlineKeyboardButton(
+                text="🫁 2–3,5 минуты",
+                callback_data="static_2",
+            )],
+            [InlineKeyboardButton(
+                text="🧘 Больше 3,5 минут",
+                callback_data="static_3",
             )],
         ]
     )
@@ -163,16 +181,13 @@ def result_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-# ──────────────────────────────────────────────
-#  Роутер и хэндлеры
-# ──────────────────────────────────────────────
+# ── Router & Handlers ─────────────────────────────────────────
 
 router = Router()
 
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
-    """Обработка команды /start — приветственное сообщение."""
     await state.clear()
     await message.answer(
         text=WELCOME_TEXT,
@@ -182,24 +197,24 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "start_quiz")
 async def on_start_quiz(callback: CallbackQuery, state: FSMContext) -> None:
-    """Кнопка «Поехали» — показываем вопрос 1."""
     await state.clear()
     await state.set_state(Quiz.waiting_depth)
     await callback.message.edit_text(
         text=QUESTION_1_TEXT,
         reply_markup=depth_keyboard(),
+        parse_mode=ParseMode.HTML,
     )
     await callback.answer()
 
 
 @router.callback_query(F.data == "restart")
 async def on_restart(callback: CallbackQuery, state: FSMContext) -> None:
-    """Кнопка «Пройти заново» — начинаем с вопроса 1."""
     await state.clear()
     await state.set_state(Quiz.waiting_depth)
     await callback.message.edit_text(
         text=QUESTION_1_TEXT,
         reply_markup=depth_keyboard(),
+        parse_mode=ParseMode.HTML,
     )
     await callback.answer()
 
@@ -209,7 +224,6 @@ async def on_restart(callback: CallbackQuery, state: FSMContext) -> None:
     F.data.in_({"depth_zero", "depth_15", "depth_30", "depth_30plus"}),
 )
 async def on_depth_answer(callback: CallbackQuery, state: FSMContext) -> None:
-    """Ответ на вопрос 1 — сохраняем глубину, показываем вопрос 2."""
     await state.update_data(depth=callback.data)
     await state.set_state(Quiz.waiting_tech)
     await callback.message.edit_text(
@@ -225,21 +239,34 @@ async def on_depth_answer(callback: CallbackQuery, state: FSMContext) -> None:
     F.data.in_({"tech_valsalva", "tech_frenzel", "tech_mouthfill"}),
 )
 async def on_tech_answer(callback: CallbackQuery, state: FSMContext) -> None:
-    """Ответ на вопрос 2 — определяем уровень и отправляем рекомендацию."""
+    await state.update_data(tech=callback.data)
+    await state.set_state(Quiz.waiting_static)
+    await callback.message.edit_text(
+        text=QUESTION_3_TEXT,
+        reply_markup=static_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    Quiz.waiting_static,
+    F.data.in_({"static_0", "static_1", "static_2", "static_3"}),
+)
+async def on_static_answer(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     depth = data.get("depth", "depth_zero")
-    tech = callback.data
+    tech = data.get("tech", "tech_valsalva")
+    static = callback.data
 
-    level = determine_level(depth, tech)
+    level = determine_level(depth, tech, static)
     recommendation_text = RECOMMENDATIONS[level]
 
     logger.info(
-        "Пользователь %s: depth=%s, tech=%s → level=%s",
-        callback.from_user.id, depth, tech, level,
+        "Пользователь %s: depth=%s, tech=%s, static=%s → level=%s",
+        callback.from_user.id, depth, tech, static, level,
     )
 
-    # Отправляем рекомендацию новым сообщением (текст длинный,
-    # edit_text может не влезть из-за лимитов inline-сообщений)
     await callback.message.edit_text(
         text="⏳ Анализирую ответы...",
     )
@@ -255,7 +282,6 @@ async def on_tech_answer(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query()
 async def on_unknown_callback(callback: CallbackQuery, state: FSMContext) -> None:
-    """Обработка неизвестных callback — предлагаем начать заново."""
     await callback.answer(
         text="Что-то пошло не так. Нажми /start, чтобы начать заново.",
         show_alert=True,
@@ -264,15 +290,12 @@ async def on_unknown_callback(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.message()
 async def on_any_message(message: Message, state: FSMContext) -> None:
-    """Любое текстовое сообщение (кроме /start) — направляем к /start."""
     await message.answer(
         "Я работаю через кнопки. Нажми /start, чтобы начать."
     )
 
 
-# ──────────────────────────────────────────────
-#  Запуск
-# ──────────────────────────────────────────────
+# ── Start ─────────────────────────────────────────────────────
 
 
 async def main() -> None:
